@@ -5,8 +5,35 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 
+
+
 namespace TCPChat
 {
+
+
+    class encryption
+    {
+        private static string xorKey = "Ztrdl3C2pDsxiEU4qKtS";
+
+
+        public static string XORCipher(string data)
+        {
+            string key = xorKey;
+            int dataLen = data.Length;
+            int keyLen = key.Length;
+            char[] output = new char[dataLen];
+
+            for (int i = 0; i < dataLen; ++i)
+            {
+                output[i] = (char)(data[i] ^ key[i % keyLen]);
+            }
+
+            return new string(output);
+        }
+
+    }
+
+
     class ServerHandler
     {
         public ServerHandler(string ip, int port)
@@ -21,44 +48,58 @@ namespace TCPChat
         public TcpListener listener;
         public List<TcpClient> clients = new List<TcpClient>();
         public bool listining = false;
+        public Dictionary<TcpClient, string> clientNames = new Dictionary<TcpClient, string>();
+        public Dictionary<string, TcpClient> inverseClientNames = new Dictionary<string, TcpClient>();
 
-
-        public async void handleClient(TcpClient client)
+        private async void handleClient(TcpClient client)
         {
             await Task.Run(async () =>
             {
                 NetworkStream nwStream = client.GetStream();
                 while (client.Connected)
                 {
-                    byte[] buffer = new byte[client.ReceiveBufferSize];
-                    int bytesRead = await nwStream.ReadAsync(buffer, 0, client.ReceiveBufferSize).ConfigureAwait(false);
-                    if(client.ReceiveBufferSize != 0)
+                    try
                     {
-                        string dataReceived = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                        if (dataReceived.StartsWith("::"))
+                        byte[] buffer = new byte[client.ReceiveBufferSize];
+                        int bytesRead = await nwStream.ReadAsync(buffer, 0, client.ReceiveBufferSize).ConfigureAwait(false);
+                        if (client.ReceiveBufferSize != 0)
                         {
-                            string usernamey = dataReceived.Remove(0, 2);
-                            publicMessage($"{usernamey} joined");
-                            continue;
+                            string dataReceived = encryption.XORCipher(Encoding.ASCII.GetString(buffer, 0, bytesRead));
+                            if (dataReceived.StartsWith("::"))
+                            {
+                                string usernamey = dataReceived.Remove(0, 2);
+                                publicMessage($"{usernamey} joined");
+                                clientNames[client] = usernamey;
+                                inverseClientNames[usernamey] = client;
+                                continue;
+                            }
+                            Console.WriteLine($"{dataReceived}");
+                            foreach (TcpClient tClient in clients)
+                            {
+                                Console.WriteLine($"[DEBUG] relayed to {clientNames[tClient]}");
+                                NetworkStream cStream = tClient.GetStream();
+                                cStream.Write(buffer, 0, bytesRead);
+                            }
                         }
-                        Console.WriteLine($"Got : {dataReceived}");
-                        foreach (TcpClient tClient in clients)
-                        {
-                            Console.WriteLine("Sending data to client");
-                            NetworkStream cStream = tClient.GetStream();
-                            cStream.Write(buffer, 0, bytesRead);
-                        }
+                    }
+                    catch (System.Exception err)
+                    {
+                        var user = clientNames[client];
+                        clientNames.Remove(client);
+                        inverseClientNames.Remove(user);
+                        clients.Remove(client);
+                        publicMessage($"{user} disconnected");
                     }
 
                 }
             });
         }
 
-        public void publicMessage(string msg)
+        private void publicMessage(string msg)
         {
             msg = $"[SERVER] {msg}";
             byte[] data = new byte[1024];
-            data = Encoding.ASCII.GetBytes(msg);
+            data = Encoding.ASCII.GetBytes(encryption.XORCipher(msg));
 
 
             foreach (TcpClient tClient in clients)
@@ -69,7 +110,7 @@ namespace TCPChat
             }
         }
 
-        public void clientJoined(TcpClient client)
+        private void clientJoined(TcpClient client)
         {
             clients.Add(client);
             handleClient(client);
@@ -78,19 +119,57 @@ namespace TCPChat
         public void startListener()
         {
             listener.Start();
+            Console.Clear();
             Console.WriteLine($"Started listener on {localAdd}:{serverPort}");
+            Console.WriteLine("xor encryption active");
             listining = true;
             listenLoop();
-            Console.ReadLine();
-            exit();
+            while (true)
+            {
+                var command = Console.ReadLine();
+
+                if (command.ToLower().Contains("say"))
+                {
+                    publicMessage(command.Trim("say".ToCharArray()));
+                }
+                else if (command.ToLower().Contains("kick"))
+                {
+                    var user = command.Remove(0, 5);
+                    user.Replace(" ", string.Empty);
+                    var client = inverseClientNames[user];
+                    publicMessage($"kicking {user}");
+                    client.Close();
+                    Console.WriteLine($"Kicked user {user}");
+                }
+                else if (command.ToLower().Contains("exit"))
+                {
+                    exit();
+                }
+                else if (command.ToLower().Contains("help"))
+                {
+                    Console.WriteLine("say - publicly say anything, ex: say Hello World");
+                    Console.WriteLine("kick - kick a user, ex: kick user");
+                    Console.WriteLine("exit - shutdown server instance");
+                }
+
+
+            }
         }
 
-        public async void listenLoop()
+        private async void listenLoop()
         {
             while (listining)
             {
-                TcpClient client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                clientJoined(client);
+                try
+                {
+                    TcpClient client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                    clientJoined(client);
+                }
+                catch
+                {
+                    Console.WriteLine("Closed");
+                    Environment.Exit(0);
+                }
                 
             }
         }
@@ -99,6 +178,7 @@ namespace TCPChat
         {
             listining = false;
             listener.Stop();
+            Environment.Exit(0);
         }
 
 
@@ -120,50 +200,56 @@ namespace TCPChat
             client = new TcpClient(ip, port);
             nwStream = client.GetStream();
 
-            Console.WriteLine("Connected!");
+            Console.WriteLine("Connected! (CTRL + C to exit)");
             serverCheck();
             sendMessage($"::{user}");
             while (client.Connected)
             {
                 string msg = Console.ReadLine();
-                if(msg == "exit")
-                {
-                    exit();
-                    Environment.Exit(0);
-                }
                 sendMessage($"[{user}] {msg}");
+
+                
             }
         }
 
-        public byte[] encodeMsg(string msg)
+        private byte[] encodeMsg(string msg)
         {
-            return ASCIIEncoding.ASCII.GetBytes(msg);
+            return ASCIIEncoding.ASCII.GetBytes(encryption.XORCipher(msg));
         }
 
-        public void sendMessage(string msg)
+        private void sendMessage(string msg)
         {
             nwStream.Write(encodeMsg(msg), 0, encodeMsg(msg).Length);
         }
 
-        public async void serverCheck()
+        private async void serverCheck()
         {
             await Task.Run(() =>
             {
                 while (true)
                 {
-                    byte[] bToRead = new byte[client.ReceiveBufferSize];
-                    if (bToRead.Length > 0)
+                    try
                     {
-                        int bRead = nwStream.Read(bToRead, 0, client.ReceiveBufferSize);
-                        string sMsg = Encoding.ASCII.GetString(bToRead, 0, bRead);
-                        if (!sMsg.Contains($"[{user}]"))
+                        byte[] bToRead = new byte[client.ReceiveBufferSize];
+                        if (bToRead.Length > 0)
                         {
-                            Console.WriteLine(Encoding.ASCII.GetString(bToRead, 0, bRead));
+                            int bRead = nwStream.Read(bToRead, 0, client.ReceiveBufferSize);
+                            string sMsg = Encoding.ASCII.GetString(bToRead, 0, bRead);
+                            sMsg = encryption.XORCipher(sMsg);
+                            if (!sMsg.Contains($"[{user}]"))
+                            {
+                                Console.WriteLine(encryption.XORCipher(Encoding.ASCII.GetString(bToRead, 0, bRead)));
 
-                            bToRead = new byte[client.ReceiveBufferSize];
+                                bToRead = new byte[client.ReceiveBufferSize];
+                            }
+
+
                         }
-
-                        
+                    }
+                    catch
+                    {
+                        Console.WriteLine("Closed");
+                        Environment.Exit(0);
                     }
                 }
             });
